@@ -1,0 +1,68 @@
+service: stepf
+
+frameworkVersion: ">=1.2.0 <2.0.0"
+
+provider:
+  name: aws
+  region: us-west-2
+  runtime: python2.7
+  memorySize: 128
+  timeout: 300
+  iamRoleStatements:
+    -  Effect: "Allow"
+       Action:
+         - "states:GetActivityTask"
+         - "states:SendTaskSuccess"
+         - "states:SendTaskFailure"
+         - "states:SendTaskHeartbeat"
+       Resource:
+         - arn:aws:states:#{AWS::Region}:#{AWS::AccountId}:activity:myTask
+    -  Effect: "Allow"
+       Action:
+         - "lambda:InvokeFunction"
+       Resource:
+         - arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${opt:stage}-proc 
+
+functions:
+  main:
+    handler: index.handler
+  checker:
+    handler: index.handlerChecker
+    events: 
+      - schedule: rate(5 minutes)
+    environment:
+      activityName: arn:aws:states:#{AWS::Region}:#{AWS::AccountId}:activity:outsideTask
+      executorName: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${opt:stage}-proc
+  proc:
+    handler: index.handlerProc
+
+package:
+  exclude:
+    - node_modules/**
+
+stepFunctions:
+  stateMachines:
+    hellostepfunc1:
+      events:
+        - http:
+            path: gofunction
+            method: GET
+      name: myStateMachine
+      definition:
+        Comment: "Step functions which triggers outside processing"
+        StartAt: TaskLambda
+        States:
+          TaskLambda:
+            Type: Task
+            Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${opt:stage}-main
+            Next: TaskActivity
+          TaskActivity:
+            Type: Task
+            Resource: arn:aws:states:#{AWS::Region}:#{AWS::AccountId}:activity:outsideTask
+            End: true
+  activities:
+    - outsideTask
+
+plugins:
+  - serverless-step-functions
+  - serverless-pseudo-parameters
