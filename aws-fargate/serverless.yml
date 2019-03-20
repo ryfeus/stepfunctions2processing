@@ -1,0 +1,490 @@
+service: StepFuncFargate
+
+frameworkVersion: ">=1.2.0 <2.0.0"
+
+provider:
+  name: aws
+  region: us-east-1
+  runtime: python3.6
+  memorySize: 128
+  timeout: 10
+
+package:
+  exclude:
+    - node_modules/**
+
+functions:
+  branch:
+    handler: index.handlerBranch
+  map:
+    handler: index.handlerMap
+  reduce:
+    handler: index.handlerReduce
+
+
+stepFunctions:
+  stateMachines:
+    HelloWorldStepFunction:
+      events:
+        - http:
+            path: startFunction
+            method: GET
+      name: ${self:service}-StepFunction
+      role:
+        Fn::Join:
+          - ''
+          - - 'arn:aws:iam::#{AWS::AccountId}:role/'
+            - Ref: ECSPassRole
+      definition:
+        StartAt: StartStepF
+        States:
+          StartStepF:
+            Type: Task
+            Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${opt:stage}-map
+            Next: FargateStep
+          FargateStep:
+            Type: Task
+            Resource: arn:aws:states:::ecs:runTask.sync
+            Parameters:
+              Cluster: "#{ECSCluster}"
+              TaskDefinition: "#{FargateTaskDefinition}"
+              LaunchType: FARGATE
+              NetworkConfiguration:
+                AwsvpcConfiguration:
+                  Subnets:
+                    - "#{PublicSubnetOne}"
+                    - "#{PublicSubnetTwo}"
+                  AssignPublicIp: ENABLED
+              Overrides:
+                ContainerOverrides:
+                  - Name: "#{ServiceName}"
+                    Command:
+                      - "app/exec"
+                    Cpu: 1
+                    Memory: 512
+                    MemoryReservation: 512
+            Next: Parallel            
+          Parallel:
+            Type: Parallel
+            Next: EndStepF
+            Branches:
+              - StartAt: Branch1
+                States:
+                  Branch1:
+                    Type: Task
+                    Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${opt:stage}-branch
+                    End: True
+              - StartAt: Branch2
+                States:
+                  Branch2:
+                    Type: Task
+                    Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${opt:stage}-branch
+                    End: True
+          EndStepF:
+            Type: Task
+            Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${opt:stage}-reduce
+            End: true
+
+plugins:
+  - serverless-step-functions
+  - serverless-pseudo-parameters
+
+resources:
+  Parameters:
+    ServiceName:
+      Type: String
+      Default: dockerFargate
+      Description: A name for the service
+    ImageUrl:
+      Type: String
+      Default: stepfunctiontest:latest
+      Description: The url of a docker image that contains the application process that
+                   will handle the traffic for this service
+    ContainerPort:
+      Type: Number
+      Default: 80
+      Description: What port number the application inside the docker container is binding to
+    ContainerCpu:
+      Type: Number
+      Default: 256
+      Description: How much CPU to give the container. 1024 is 1 CPU
+    ContainerMemory:
+      Type: Number
+      Default: 512
+      Description: How much memory in megabytes to give the container
+    Path:
+      Type: String
+      Default: "*"
+      Description: A path on the public load balancer that this service
+                   should be connected to. Use * to send all load balancer
+                   traffic to this service.
+    Priority:
+      Type: Number
+      Default: 1
+      Description: The priority for the routing rule added to the load balancer.
+                   This only applies if your have multiple services which have been
+                   assigned to different paths on the load balancer.
+    DesiredCount:
+      Type: Number
+      Default: 0
+      Description: How many copies of the service task to run
+    Role:
+      Type: String
+      Default: ""
+      Description: (Optional) An IAM role to give the service's containers if the code within needs to
+                   access other AWS resources like S3 buckets, DynamoDB tables, etc                   
+
+  Conditions:
+    HasCustomRole: !Not [ !Equals [!Ref 'Role', ''] ]
+
+  Resources:
+    # VPC in which containers will be networked.
+    # It has two public subnets
+    # We distribute the subnets across the first two available subnets
+    # for the region, for high availability.
+    VPC:
+      Type: AWS::EC2::VPC
+      Properties:
+        EnableDnsSupport: true
+        EnableDnsHostnames: true
+        CidrBlock: '10.0.0.0/16'
+
+    # Two public subnets, where containers can have public IP addresses
+    PublicSubnetOne:
+      Type: AWS::EC2::Subnet
+      Properties:
+        AvailabilityZone:
+           Fn::Select:
+           - 0
+           - Fn::GetAZs: {Ref: 'AWS::Region'}
+        VpcId: !Ref 'VPC'
+        CidrBlock: '10.0.0.0/24'
+        MapPublicIpOnLaunch: true
+    PublicSubnetTwo:
+      Type: AWS::EC2::Subnet
+      Properties:
+        AvailabilityZone:
+           Fn::Select:
+           - 1
+           - Fn::GetAZs: {Ref: 'AWS::Region'}
+        VpcId: !Ref 'VPC'
+        CidrBlock: '10.0.1.0/24'
+        MapPublicIpOnLaunch: true
+
+    # Setup networking resources for the public subnets. Containers
+    # in the public subnets have public IP addresses and the routing table
+    # sends network traffic via the internet gateway.
+    InternetGateway:
+      Type: AWS::EC2::InternetGateway
+    GatewayAttachement:
+      Type: AWS::EC2::VPCGatewayAttachment
+      Properties:
+        VpcId: !Ref 'VPC'
+        InternetGatewayId: !Ref 'InternetGateway'
+    PublicRouteTable:
+      Type: AWS::EC2::RouteTable
+      Properties:
+        VpcId: !Ref 'VPC'
+    PublicRoute:
+      Type: AWS::EC2::Route
+      DependsOn: GatewayAttachement
+      Properties:
+        RouteTableId: !Ref 'PublicRouteTable'
+        DestinationCidrBlock: '0.0.0.0/0'
+        GatewayId: !Ref 'InternetGateway'
+    PublicSubnetOneRouteTableAssociation:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        SubnetId: !Ref PublicSubnetOne
+        RouteTableId: !Ref PublicRouteTable
+    PublicSubnetTwoRouteTableAssociation:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        SubnetId: !Ref PublicSubnetTwo
+        RouteTableId: !Ref PublicRouteTable
+
+    # ECS Resources
+    ECSCluster:
+      Type: AWS::ECS::Cluster
+
+    # A security group for the containers we will run in Fargate.
+    # Two rules, allowing network traffic from a public facing load
+    # balancer and from other members of the security group.
+    #
+    # Remove any of the following ingress rules that are not needed.
+    # If you want to make direct requests to a container using its
+    # public IP address you'll need to add a security group rule
+    # to allow traffic from all IP addresses.
+    FargateContainerSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Access to the Fargate containers
+        VpcId: !Ref 'VPC'
+    EcsSecurityGroupIngressFromPublicALB:
+      Type: AWS::EC2::SecurityGroupIngress
+      Properties:
+        Description: Ingress from the public ALB
+        GroupId: !Ref 'FargateContainerSecurityGroup'
+        IpProtocol: -1
+        SourceSecurityGroupId: !Ref 'PublicLoadBalancerSG'
+    EcsSecurityGroupIngressFromSelf:
+      Type: AWS::EC2::SecurityGroupIngress
+      Properties:
+        Description: Ingress from other containers in the same security group
+        GroupId: !Ref 'FargateContainerSecurityGroup'
+        IpProtocol: -1
+        SourceSecurityGroupId: !Ref 'FargateContainerSecurityGroup'
+
+    # Load balancers for getting traffic to containers.
+    # This sample template creates one load balancer:
+    #
+    # - One public load balancer, hosted in public subnets that is accessible
+    #   to the public, and is intended to route traffic to one or more public
+    #   facing services.
+
+    # A public facing load balancer, this is used for accepting traffic from the public
+    # internet and directing it to public facing microservices
+    PublicLoadBalancerSG:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Access to the public facing load balancer
+        VpcId: !Ref 'VPC'
+        SecurityGroupIngress:
+            # Allow access to ALB from anywhere on the internet
+            - CidrIp: 0.0.0.0/0
+              IpProtocol: -1
+    PublicLoadBalancer:
+      Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+      Properties:
+        Scheme: internet-facing
+        LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '30'
+        Subnets:
+          # The load balancer is placed into the public subnets, so that traffic
+          # from the internet can reach the load balancer directly via the internet gateway
+          - !Ref PublicSubnetOne
+          - !Ref PublicSubnetTwo
+        SecurityGroups: [!Ref 'PublicLoadBalancerSG']
+    # A dummy target group is used to setup the ALB to just drop traffic
+    # initially, before any real service target groups have been added.
+    DummyTargetGroupPublic:
+      Type: AWS::ElasticLoadBalancingV2::TargetGroup
+      Properties:
+        HealthCheckIntervalSeconds: 6
+        HealthCheckPath: /
+        HealthCheckProtocol: HTTP
+        HealthCheckTimeoutSeconds: 5
+        HealthyThresholdCount: 2
+        Name: !Join ['-', [!Ref 'AWS::StackName', 'drop-1']]
+        Port: 80
+        Protocol: HTTP
+        UnhealthyThresholdCount: 2
+        VpcId: !Ref 'VPC'
+    PublicLoadBalancerListener:
+      Type: AWS::ElasticLoadBalancingV2::Listener
+      DependsOn:
+        - PublicLoadBalancer
+      Properties:
+        DefaultActions:
+          - TargetGroupArn: !Ref 'DummyTargetGroupPublic'
+            Type: 'forward'
+        LoadBalancerArn: !Ref 'PublicLoadBalancer'
+        Port: 80
+        Protocol: HTTP
+
+    # This is an IAM role which authorizes ECS to manage resources on your
+    # account on your behalf, such as updating your load balancer with the
+    # details of where your containers are, so that traffic can reach your
+    # containers.
+    ECSRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ecs.amazonaws.com]
+            Action: ['sts:AssumeRole']
+        Path: /
+        Policies:
+        - PolicyName: ecs-service
+          PolicyDocument:
+            Statement:
+            - Effect: Allow
+              Action:
+                # Rules which allow ECS to attach network interfaces to instances
+                # on your behalf in order for awsvpc networking mode to work right
+                - 'ec2:AttachNetworkInterface'
+                - 'ec2:CreateNetworkInterface'
+                - 'ec2:CreateNetworkInterfacePermission'
+                - 'ec2:DeleteNetworkInterface'
+                - 'ec2:DeleteNetworkInterfacePermission'
+                - 'ec2:Describe*'
+                - 'ec2:DetachNetworkInterface'
+
+                # Rules which allow ECS to update load balancers on your behalf
+                # with the information sabout how to send traffic to your containers
+                - 'elasticloadbalancing:DeregisterInstancesFromLoadBalancer'
+                - 'elasticloadbalancing:DeregisterTargets'
+                - 'elasticloadbalancing:Describe*'
+                - 'elasticloadbalancing:RegisterInstancesWithLoadBalancer'
+                - 'elasticloadbalancing:RegisterTargets'
+              Resource: '*'
+
+    # This is a role which is used by the ECS tasks themselves.
+    ECSTaskExecutionRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ecs-tasks.amazonaws.com]
+            Action: ['sts:AssumeRole']
+        Path: /
+        Policies:
+          - PolicyName: AmazonECSTaskExecutionRolePolicy
+            PolicyDocument:
+              Statement:
+              - Effect: Allow
+                Action:
+                  # Allow the ECS Tasks to download images from ECR
+                  - 'ecr:GetAuthorizationToken'
+                  - 'ecr:BatchCheckLayerAvailability'
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:BatchGetImage'
+
+                  # Allow the ECS tasks to upload logs to CloudWatch
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+
+    # The task definition. This is a simple metadata description of what
+    # container to run, and what resource requirements it has.
+    FargateTaskDefinition:
+      Type: AWS::ECS::TaskDefinition
+      Properties:
+        Family: !Ref 'ServiceName'
+        Cpu: !Ref 'ContainerCpu'
+        Memory: !Ref 'ContainerMemory'
+        NetworkMode: awsvpc
+        RequiresCompatibilities:
+          - FARGATE
+        ExecutionRoleArn: !Ref ECSTaskExecutionRole
+        TaskRoleArn:
+          Fn::If:
+            - 'HasCustomRole'
+            - !Ref 'Role'
+            - !Ref "AWS::NoValue"
+        ContainerDefinitions:
+          - Name: !Ref 'ServiceName'
+            Cpu: !Ref 'ContainerCpu'
+            Memory: !Ref 'ContainerMemory'
+            Image: '#{AWS::AccountId}.dkr.ecr.#{AWS::Region}.amazonaws.com/#{ImageUrl}'
+            PortMappings:
+              - ContainerPort: !Ref 'ContainerPort'
+            LogConfiguration:
+              LogDriver: awslogs
+              Options:
+                awslogs-group: /ecs/first-run-task-definition
+                awslogs-region: '#{AWS::Region}'
+                awslogs-stream-prefix: ecs
+
+    # The service. The service is a resource which allows you to run multiple
+    # copies of a type of task, and gather up their logs and metrics, as well
+    # as monitor the number of running tasks and replace any that have crashed
+    Service:
+      Type: AWS::ECS::Service
+      DependsOn: LoadBalancerRule
+      Properties:
+        ServiceName: !Ref 'ServiceName'
+        Cluster: !Ref 'ECSCluster'
+        LaunchType: FARGATE
+        DeploymentConfiguration:
+          MaximumPercent: 200
+          MinimumHealthyPercent: 75
+        DesiredCount: !Ref 'DesiredCount'
+        NetworkConfiguration:
+          AwsvpcConfiguration:
+            AssignPublicIp: ENABLED
+            SecurityGroups:
+              - !Ref FargateContainerSecurityGroup
+            Subnets:
+              - !Ref PublicSubnetOne
+              - !Ref PublicSubnetTwo
+        TaskDefinition: !Ref 'FargateTaskDefinition'
+        LoadBalancers:
+          - ContainerName: !Ref 'ServiceName'
+            ContainerPort: !Ref 'ContainerPort'
+            TargetGroupArn: !Ref 'TargetGroup'
+
+    # A target group. This is used for keeping track of all the tasks, and
+    # what IP addresses / port numbers they have. You can query it yourself,
+    # to use the addresses yourself, but most often this target group is just
+    # connected to an application load balancer, or network load balancer, so
+    # it can automatically distribute traffic across all the targets.
+    TargetGroup:
+      Type: AWS::ElasticLoadBalancingV2::TargetGroup
+      Properties:
+        HealthCheckIntervalSeconds: 6
+        HealthCheckPath: /
+        HealthCheckProtocol: HTTP
+        HealthCheckTimeoutSeconds: 5
+        HealthyThresholdCount: 2
+        TargetType: ip
+        Name: !Ref 'ServiceName'
+        Port: !Ref 'ContainerPort'
+        Protocol: HTTP
+        UnhealthyThresholdCount: 2
+        VpcId: !Ref 'VPC'
+
+    # Create a rule on the load balancer for routing traffic to the target group
+    LoadBalancerRule:
+      Type: AWS::ElasticLoadBalancingV2::ListenerRule
+      Properties:
+        Actions:
+          - TargetGroupArn: !Ref 'TargetGroup'
+            Type: 'forward'
+        Conditions:
+          - Field: path-pattern
+            Values: [!Ref 'Path']
+        ListenerArn: !Ref PublicLoadBalancerListener
+        Priority: !Ref 'Priority'
+    ECSPassRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Statement:
+          - Effect: Allow
+            Principal:
+              Service: ['states.#{AWS::Region}.amazonaws.com']
+            Action: ['sts:AssumeRole']
+        Path: /
+        Policies:
+          - PolicyName: AmazonECSPassRolePolicy
+            PolicyDocument:
+              Statement:
+              - Effect: Allow
+                Action:
+                  - 'iam:PassRole'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource:
+                  - 'arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:#{AWS::StackName}-branch'
+                  - 'arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:#{AWS::StackName}-map'
+                  - 'arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:#{AWS::StackName}-reduce'
+              - Effect: Allow
+                Action:
+                  - 'ecs:RunTask'
+                  - 'ecs:StopTask'
+                  - 'ecs:DescribeTasks'
+                Resource: '*' 
+              - Effect: Allow
+                Action:
+                  - 'events:PutTargets'
+                  - 'events:PutRule'
+                  - 'events:DescribeRule'
+                Resource: 'arn:aws:events:#{AWS::Region}:#{AWS::AccountId}:rule/StepFunctionsGetEventsForECSTaskRule'     

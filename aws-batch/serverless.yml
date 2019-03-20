@@ -1,0 +1,189 @@
+service: StepFuncBatch
+
+frameworkVersion: ">=1.2.0 <2.0.0"
+
+provider:
+  name: aws
+  region: us-east-1
+  runtime: python3.6
+  memorySize: 128
+  timeout: 10
+
+package:
+  exclude:
+    - node_modules/**
+
+functions:
+  branch:
+    handler: index.handlerBranch
+  map:
+    handler: index.handlerMap
+  reduce:
+    handler: index.handlerReduce
+
+
+stepFunctions:
+  stateMachines:
+    HelloWorldStepFunction:
+      events:
+        - http:
+            path: startFunction
+            method: GET
+      name: ${self:service}-StepFunction
+      definition:
+        StartAt: StartStepF
+        States:
+          StartStepF:
+            Type: Task
+            Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${opt:stage}-map
+            Next: BatchStep
+          BatchStep:
+            Type: Task
+            Resource: arn:aws:states:::batch:submitJob.sync
+            Parameters:
+              JobName: TestStep
+              JobDefinition: "#{JobDefinition}"
+              JobQueue: "#{JobQueue}"
+              ContainerOverrides:
+                Command:
+                  - 'app/exec'
+            Next: Parallel
+          Parallel:
+            Type: Parallel
+            Next: EndStepF
+            Branches:
+              - StartAt: Branch1
+                States:
+                  Branch1:
+                    Type: Task
+                    Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${opt:stage}-branch
+                    End: True
+              - StartAt: Branch2
+                States:
+                  Branch2:
+                    Type: Task
+                    Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${opt:stage}-branch
+                    End: True
+          EndStepF:
+            Type: Task
+            Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${opt:stage}-reduce
+            End: true
+
+plugins:
+  - serverless-step-functions
+  - serverless-pseudo-parameters
+
+resources:
+  Parameters:
+    ImageUrl:
+      Type: String
+      Default: stepfunctiontest:latest
+      Description: The url of a docker image that contains the application process that
+                   will handle the traffic for this service
+  Resources:
+    ComputeEnvironment:
+      Type: AWS::Batch::ComputeEnvironment
+      Properties:
+        Type: MANAGED
+        ServiceRole: arn:aws:iam::#{AWS::AccountId}:role/service-role/AWSBatchServiceRole
+        ComputeEnvironmentName: '#{AWS::StackName}-ComputeEnvironment'
+        ComputeResources:
+          MaxvCpus: 128
+          SecurityGroupIds:
+            - !Ref BatchSecurityGroup
+          Type: SPOT
+          SpotIamFleetRole: arn:aws:iam::#{AWS::AccountId}:role/aws-ec2-spot-fleet-tagging-role
+          Subnets:
+            - !Ref PublicSubnet1
+          MinvCpus: 0
+          InstanceRole: ecsInstanceRole
+          InstanceTypes:
+            - c5.large
+          Tags: {"Name": "Batch Instance - #{AWS::StackName}"}
+          DesiredvCpus: 0
+        State: ENABLED
+    JobQueue:
+      Type: AWS::Batch::JobQueue
+      Properties:
+        ComputeEnvironmentOrder:
+          - Order: 1
+            ComputeEnvironment: !Ref ComputeEnvironment
+        State: ENABLED
+        Priority: 1
+        JobQueueName: '#{AWS::StackName}-JobQueue'
+    JobDefinition:
+      Type: "AWS::Batch::JobDefinition"
+      Properties:
+        Type: Container
+        ContainerProperties: 
+          Command: 
+            - ls
+          Memory: 128
+          Vcpus: 1
+          Image: '#{AWS::AccountId}.dkr.ecr.#{AWS::Region}.amazonaws.com/#{ImageUrl}'
+        JobDefinitionName: '#{AWS::StackName}-JobDefinition'
+        RetryStrategy: 
+          Attempts: 1
+    PubPrivateVPC:
+      Type: 'AWS::EC2::VPC'
+      Properties:
+        CidrBlock: 172.31.0.0/16
+        Tags:
+          - Key: Name
+            Value: !Join [_, [!Ref 'AWS::StackName']]
+    PublicSubnet1:
+      Type: 'AWS::EC2::Subnet'
+      Properties:
+        VpcId: !Ref PubPrivateVPC
+        AvailabilityZone: '#{AWS::Region}a'
+        CidrBlock: 172.31.48.0/20
+        MapPublicIpOnLaunch: true
+    InternetGateway:
+      Type: 'AWS::EC2::InternetGateway'
+      Properties:
+        Tags:
+          - Key: Name
+            Value: !Join [_, [!Ref 'AWS::StackName']]
+          - Key: Network
+            Value: Public
+    GatewayToInternet:
+      Type: 'AWS::EC2::VPCGatewayAttachment'
+      Properties:
+        VpcId: !Ref PubPrivateVPC
+        InternetGatewayId: !Ref InternetGateway
+    PublicRouteTable:
+      Type: 'AWS::EC2::RouteTable'
+      Properties:
+        VpcId: !Ref PubPrivateVPC
+        Tags:
+          - Key: Network
+            Value: Public
+    PublicRoute:
+      Type: 'AWS::EC2::Route'
+      DependsOn: GatewayToInternet
+      Properties:
+        RouteTableId: !Ref PublicRouteTable
+        DestinationCidrBlock: 0.0.0.0/0
+        GatewayId: !Ref InternetGateway
+    PublicSubnet1RouteTableAssociation:
+      Type: 'AWS::EC2::SubnetRouteTableAssociation'
+      Properties:
+        SubnetId: !Ref PublicSubnet1
+        RouteTableId: !Ref PublicRouteTable
+    NatGateway:
+      Type: "AWS::EC2::NatGateway"
+      DependsOn: NatPublicIP
+      Properties: 
+        AllocationId: !GetAtt NatPublicIP.AllocationId
+        SubnetId: !Ref PublicSubnet1
+    NatPublicIP:
+      Type: "AWS::EC2::EIP"
+      DependsOn: PubPrivateVPC
+      Properties:
+        Domain: vpc
+    BatchSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Allow all ports
+        VpcId:
+          Ref: PubPrivateVPC
