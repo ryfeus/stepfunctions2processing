@@ -1,4 +1,4 @@
-service: StepFuncFargate
+service: StepFunctionFargate
 
 frameworkVersion: ">=1.2.0 <2.0.0"
 
@@ -220,13 +220,6 @@ resources:
       Properties:
         GroupDescription: Access to the Fargate containers
         VpcId: !Ref 'VPC'
-    EcsSecurityGroupIngressFromPublicALB:
-      Type: AWS::EC2::SecurityGroupIngress
-      Properties:
-        Description: Ingress from the public ALB
-        GroupId: !Ref 'FargateContainerSecurityGroup'
-        IpProtocol: -1
-        SourceSecurityGroupId: !Ref 'PublicLoadBalancerSG'
     EcsSecurityGroupIngressFromSelf:
       Type: AWS::EC2::SecurityGroupIngress
       Properties:
@@ -234,65 +227,6 @@ resources:
         GroupId: !Ref 'FargateContainerSecurityGroup'
         IpProtocol: -1
         SourceSecurityGroupId: !Ref 'FargateContainerSecurityGroup'
-
-    # Load balancers for getting traffic to containers.
-    # This sample template creates one load balancer:
-    #
-    # - One public load balancer, hosted in public subnets that is accessible
-    #   to the public, and is intended to route traffic to one or more public
-    #   facing services.
-
-    # A public facing load balancer, this is used for accepting traffic from the public
-    # internet and directing it to public facing microservices
-    PublicLoadBalancerSG:
-      Type: AWS::EC2::SecurityGroup
-      Properties:
-        GroupDescription: Access to the public facing load balancer
-        VpcId: !Ref 'VPC'
-        SecurityGroupIngress:
-            # Allow access to ALB from anywhere on the internet
-            - CidrIp: 0.0.0.0/0
-              IpProtocol: -1
-    PublicLoadBalancer:
-      Type: AWS::ElasticLoadBalancingV2::LoadBalancer
-      Properties:
-        Scheme: internet-facing
-        LoadBalancerAttributes:
-        - Key: idle_timeout.timeout_seconds
-          Value: '30'
-        Subnets:
-          # The load balancer is placed into the public subnets, so that traffic
-          # from the internet can reach the load balancer directly via the internet gateway
-          - !Ref PublicSubnetOne
-          - !Ref PublicSubnetTwo
-        SecurityGroups: [!Ref 'PublicLoadBalancerSG']
-    # A dummy target group is used to setup the ALB to just drop traffic
-    # initially, before any real service target groups have been added.
-    DummyTargetGroupPublic:
-      Type: AWS::ElasticLoadBalancingV2::TargetGroup
-      Properties:
-        HealthCheckIntervalSeconds: 6
-        HealthCheckPath: /
-        HealthCheckProtocol: HTTP
-        HealthCheckTimeoutSeconds: 5
-        HealthyThresholdCount: 2
-        Name: !Join ['-', [!Ref 'AWS::StackName', 'drop-1']]
-        Port: 80
-        Protocol: HTTP
-        UnhealthyThresholdCount: 2
-        VpcId: !Ref 'VPC'
-    PublicLoadBalancerListener:
-      Type: AWS::ElasticLoadBalancingV2::Listener
-      DependsOn:
-        - PublicLoadBalancer
-      Properties:
-        DefaultActions:
-          - TargetGroupArn: !Ref 'DummyTargetGroupPublic'
-            Type: 'forward'
-        LoadBalancerArn: !Ref 'PublicLoadBalancer'
-        Port: 80
-        Protocol: HTTP
-
     # This is an IAM role which authorizes ECS to manage resources on your
     # account on your behalf, such as updating your load balancer with the
     # details of where your containers are, so that traffic can reach your
@@ -322,14 +256,6 @@ resources:
                 - 'ec2:DeleteNetworkInterfacePermission'
                 - 'ec2:Describe*'
                 - 'ec2:DetachNetworkInterface'
-
-                # Rules which allow ECS to update load balancers on your behalf
-                # with the information sabout how to send traffic to your containers
-                - 'elasticloadbalancing:DeregisterInstancesFromLoadBalancer'
-                - 'elasticloadbalancing:DeregisterTargets'
-                - 'elasticloadbalancing:Describe*'
-                - 'elasticloadbalancing:RegisterInstancesWithLoadBalancer'
-                - 'elasticloadbalancing:RegisterTargets'
               Resource: '*'
 
     # This is a role which is used by the ECS tasks themselves.
@@ -396,7 +322,6 @@ resources:
     # as monitor the number of running tasks and replace any that have crashed
     Service:
       Type: AWS::ECS::Service
-      DependsOn: LoadBalancerRule
       Properties:
         ServiceName: !Ref 'ServiceName'
         Cluster: !Ref 'ECSCluster'
@@ -414,43 +339,7 @@ resources:
               - !Ref PublicSubnetOne
               - !Ref PublicSubnetTwo
         TaskDefinition: !Ref 'FargateTaskDefinition'
-        LoadBalancers:
-          - ContainerName: !Ref 'ServiceName'
-            ContainerPort: !Ref 'ContainerPort'
-            TargetGroupArn: !Ref 'TargetGroup'
 
-    # A target group. This is used for keeping track of all the tasks, and
-    # what IP addresses / port numbers they have. You can query it yourself,
-    # to use the addresses yourself, but most often this target group is just
-    # connected to an application load balancer, or network load balancer, so
-    # it can automatically distribute traffic across all the targets.
-    TargetGroup:
-      Type: AWS::ElasticLoadBalancingV2::TargetGroup
-      Properties:
-        HealthCheckIntervalSeconds: 6
-        HealthCheckPath: /
-        HealthCheckProtocol: HTTP
-        HealthCheckTimeoutSeconds: 5
-        HealthyThresholdCount: 2
-        TargetType: ip
-        Name: !Ref 'ServiceName'
-        Port: !Ref 'ContainerPort'
-        Protocol: HTTP
-        UnhealthyThresholdCount: 2
-        VpcId: !Ref 'VPC'
-
-    # Create a rule on the load balancer for routing traffic to the target group
-    LoadBalancerRule:
-      Type: AWS::ElasticLoadBalancingV2::ListenerRule
-      Properties:
-        Actions:
-          - TargetGroupArn: !Ref 'TargetGroup'
-            Type: 'forward'
-        Conditions:
-          - Field: path-pattern
-            Values: [!Ref 'Path']
-        ListenerArn: !Ref PublicLoadBalancerListener
-        Priority: !Ref 'Priority'
     ECSPassRole:
       Type: AWS::IAM::Role
       Properties:
