@@ -170,17 +170,6 @@ resources:
       Properties:
         SubnetId: !Ref PublicSubnet1
         RouteTableId: !Ref PublicRouteTable
-    NatGateway:
-      Type: "AWS::EC2::NatGateway"
-      DependsOn: NatPublicIP
-      Properties: 
-        AllocationId: !GetAtt NatPublicIP.AllocationId
-        SubnetId: !Ref PublicSubnet1
-    NatPublicIP:
-      Type: "AWS::EC2::EIP"
-      DependsOn: PubPrivateVPC
-      Properties:
-        Domain: vpc
     BatchSecurityGroup:
       Type: AWS::EC2::SecurityGroup
       Properties:
