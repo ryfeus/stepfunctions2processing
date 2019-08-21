@@ -46,7 +46,7 @@ stepFunctions:
               JobQueue: "#{JobQueue}"
               ContainerOverrides:
                 Command:
-                  - 'app/exec'
+                  - '/app/exec'
             Next: Parallel
           Parallel:
             Type: Parallel
@@ -77,7 +77,7 @@ resources:
   Parameters:
     ImageUrl:
       Type: String
-      Default: stepfunctiondeepbatch:latest
+      Default: stepfunctiondeepbatch:tensorflow
       Description: The url of a docker image that contains the application process that
                    will handle the traffic for this service
   Resources:
