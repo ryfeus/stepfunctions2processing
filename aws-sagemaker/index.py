@@ -1,6 +1,3 @@
-import boto3
-import json
-import io
 import random
 import string
 from datetime import datetime
