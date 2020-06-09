@@ -26,7 +26,7 @@ functions:
 
 stepFunctions:
   stateMachines:
-    FargateStepFunction:
+    SagemakerStepFunction:
       events:
         - http:
             path: startFunction
