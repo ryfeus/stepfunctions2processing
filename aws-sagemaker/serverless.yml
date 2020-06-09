@@ -1,0 +1,117 @@
+service: DeepLearningSagemaker
+
+frameworkVersion: ">=1.2.0 <2.0.0"
+
+provider:
+  name: aws
+  region: us-east-1
+  runtime: python3.6
+  memorySize: 1536
+  timeout: 30
+
+package:
+  exclude:
+    - node_modules/**
+    - container/**
+    - README.md
+    - package.json
+    - package-lock.json
+
+functions:
+  preprocessingLambda:
+    handler: index.handlerPreprocessing
+  postprocessingLambda:
+    handler: index.handlerPostprocessing
+
+
+stepFunctions:
+  stateMachines:
+    FargateStepFunction:
+      events:
+        - http:
+            path: startFunction
+            method: GET
+      name: ${self:service}-StepFunction
+      role:
+        Fn::GetAtt: [StepFunctionsRole, Arn]
+      definition:
+        StartAt: PreprocessingLambdaStep
+        States:
+          PreprocessingLambdaStep:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [preprocessingLambda, Arn]
+            Next: TrainingSagemakerStep
+          TrainingSagemakerStep:
+            Type: Task
+            Resource: arn:aws:states:::sagemaker:createTrainingJob.sync
+            Next: PostprocessingLambdaStep
+            Parameters:
+              TrainingJobName.$: "$.name"
+              ResourceConfig:
+                InstanceCount: 1
+                InstanceType: ml.p2.xlarge
+                VolumeSizeInGB: 30
+              StoppingCondition:
+                MaxRuntimeInSeconds: 86400
+                MaxWaitTimeInSeconds: 86400
+              HyperParameters.$: "$.hyperparameters"
+              AlgorithmSpecification:
+                TrainingImage: '#{AWS::AccountId}.dkr.ecr.#{AWS::Region}.amazonaws.com/aws-sagemaker-example:latest'
+                TrainingInputMode: File
+              OutputDataConfig:
+                S3OutputPath: s3://sagemaker-#{AWS::Region}-#{AWS::AccountId}/
+              EnableManagedSpotTraining: true
+              RoleArn: arn:aws:iam::#{AWS::AccountId}:role/SageMakerAccessRole
+          PostprocessingLambdaStep:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [postprocessingLambda, Arn]
+            End: true
+
+plugins:
+  - serverless-step-functions
+  - serverless-pseudo-parameters
+
+resources:
+  Resources:
+    StepFunctionsRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Statement:
+          - Effect: Allow
+            Principal:
+              Service: ['states.#{AWS::Region}.amazonaws.com']
+            Action: ['sts:AssumeRole']
+        Path: /
+        Policies:
+          - PolicyName: AmazonStepFunctionsPolicy
+            PolicyDocument:
+              Statement:
+              - Effect: Allow
+                Action:
+                  - 'iam:PassRole'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource:
+                  - 'arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:#{AWS::StackName}-preprocessingLambda'
+                  - 'arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:#{AWS::StackName}-postprocessingLambda'
+              - Effect: Allow
+                Action:
+                  - 'sagemaker:CreateTrainingJob'
+                  - 'sagemaker:DescribeTrainingJob'
+                  - 'sagemaker:StopTrainingJob'
+                Resource: 'arn:aws:sagemaker:#{AWS::Region}:#{AWS::AccountId}:training-job/*'
+              - Effect: Allow
+                Action:
+                  - 'sagemaker:ListTags'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'events:PutTargets'
+                  - 'events:PutRule'
+                  - 'events:DescribeRule'
+                Resource: 'arn:aws:events:#{AWS::Region}:#{AWS::AccountId}:rule/StepFunctionsGetEventsForSageMakerTrainingJobsRule'
