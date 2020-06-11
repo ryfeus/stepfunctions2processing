@@ -40,7 +40,7 @@ model.compile(optimizer='adam',
               loss='sparse_categorical_crossentropy',
               metrics=['accuracy'])
 
-model.fit(train_images, train_labels, epochs=10)
+model.fit(train_images, train_labels, epochs=int(hyperparameters['num_of_epochs']))
 
 ## Checking final model metrics
 test_loss, test_acc = model.evaluate(test_images, test_labels)
