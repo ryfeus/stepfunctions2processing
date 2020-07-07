@@ -18,7 +18,7 @@ import software.amazon.codeguruprofilerjavaagent.Profiler;
 public class DemoApplication {
 	private static Profiler profiler;
 	private static final String functionName = "StepFuncBatchWithProfiler-dev-async";
-	private static final String profilingGroupName = "test";//"demoApplication";
+	private static final String profilingGroupName = "demoApplication";
 
 	public static void main(String[] args) {
 		startProfiler();
