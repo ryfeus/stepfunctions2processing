@@ -1,0 +1,308 @@
+service: DeepLearningTrainingCPU
+
+frameworkVersion: ">=1.2.0 <2.0.0"
+
+provider:
+  name: aws
+  region: us-east-1
+  runtime: python3.6
+  memorySize: 128
+  timeout: 10
+  iamRoleStatements:
+    # Allow Lambda to download and upload files to S3 bucket
+    - Effect: Allow
+      Action:
+        - 's3:ListBucket'
+      Resource: 'arn:aws:s3:::#{S3BucketName}'
+    - Effect: Allow
+      Action:
+        - 's3:PutObject'
+        - 's3:GetObject'
+      Resource: 'arn:aws:s3:::#{S3BucketName}/*'
+
+package:
+  exclude:
+    - node_modules/**
+
+functions:
+  map:
+    handler: index.handlerMap
+  reduce:
+    handler: index.handlerReduce
+  publisher:
+    handler: index.handlerPublisher
+
+
+stepFunctions:
+  stateMachines:
+    HelloWorldStepFunction:
+      role: !GetAtt StateMachineRole.Arn
+      events:
+        - http:
+            path: startFunction
+            method: GET
+      name: ${self:service}-StepFunction
+      definition:
+        StartAt: StartStepF
+        States:
+          StartStepF:
+            Type: Pass
+            Result:
+              s3_bucket: '#{S3BucketName}'
+            ResultPath: "$.state_params"
+            Next: PrepareMapStepF
+          PrepareMapStepF:
+            Type: Task
+            Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${opt:stage}-map
+            Next: MapStep
+          MapStep:
+            Type: Map
+            ItemsPath: "$.tasks"
+            Iterator:
+              StartAt: BatchStep
+              States:
+                BatchStep:
+                  Type: Task
+                  Resource: arn:aws:states:::batch:submitJob.sync
+                  Parameters:
+                    JobName: TrainStep
+                    JobDefinition: "#{JobDefinition}"
+                    JobQueue: "#{JobQueue}"
+                    ContainerOverrides:
+                      Command.$: "$.task_command"
+                  End: true
+            ResultPath: "$.map_result"
+            Retry:
+              - ErrorEquals:
+                - "States.ALL"
+                IntervalSeconds: 10
+                MaxAttempts: 2
+                BackoffRate: 2
+            Next: ReduceStepF
+          ReduceStepF:
+            Type: Task
+            Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${opt:stage}-reduce
+            Next: PublishStepF
+          PublishStepF:
+            Type: Task
+            Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${opt:stage}-publisher
+            End: true
+
+plugins:
+  - serverless-step-functions
+  - serverless-pseudo-parameters
+
+resources:
+  Parameters:
+    ImageName:
+      Type: String
+      Default: ${env:IMAGE_NAME} # ryfeus/serverless-for-deep-learning:cpu
+      Description: The name of a docker image that contains the training code
+    S3BucketName:
+      Type: String
+      Default: ${env:S3_BUCKET} # serverless-for-deep-learning
+      Description: S3 bucket which we will use to store hyperparameters and models
+    ComputeType:
+      Type: String
+      Default: ${env:INSTANCE_TYPE} # EC2 or SPOT
+      Description: Type of instance which will be used
+  Resources:
+    ComputeEnvironment:
+      Type: AWS::Batch::ComputeEnvironment
+      Properties:
+        Type: MANAGED
+        ServiceRole: AWSBatchServiceRole
+        ComputeEnvironmentName: '#{AWS::StackName}-ComputeEnvironment'
+        ComputeResources:
+          MaxvCpus: 16
+          SecurityGroupIds:
+            - !Ref BatchSecurityGroup
+          Type: '#{ComputeType}'
+          SpotIamFleetRole: !GetAtt EC2SpotFleetTaggingRole.Arn
+          Subnets:
+            - !Ref PublicSubnet1
+          MinvCpus: 0
+          InstanceRole: !Ref ECSInstanceRole
+          InstanceTypes:
+            - c5.large
+          Tags: {"Name": "Batch Instance - #{AWS::StackName}"}
+          DesiredvCpus: 0
+        State: ENABLED
+    JobQueue:
+      Type: AWS::Batch::JobQueue
+      Properties:
+        ComputeEnvironmentOrder:
+          - Order: 1
+            ComputeEnvironment: !Ref ComputeEnvironment
+        State: ENABLED
+        Priority: 1
+        JobQueueName: '#{AWS::StackName}-JobQueue'
+    JobDefinition:
+      Type: "AWS::Batch::JobDefinition"
+      Properties:
+        Type: Container
+        ContainerProperties: 
+          Image: '#{ImageName}'
+          JobRoleArn: !Ref ECSTaskRole
+          Memory: 2000
+          Vcpus: 2
+        JobDefinitionName: '#{AWS::StackName}-JobDefinition'
+        RetryStrategy: 
+          Attempts: 1
+    PubPrivateVPC:
+      Type: 'AWS::EC2::VPC'
+      Properties:
+        CidrBlock: 172.31.0.0/16
+        Tags:
+          - Key: Name
+            Value: !Join [_, [!Ref 'AWS::StackName']]
+    PublicSubnet1:
+      Type: 'AWS::EC2::Subnet'
+      Properties:
+        VpcId: !Ref PubPrivateVPC
+        AvailabilityZone: '#{AWS::Region}a'
+        CidrBlock: 172.31.48.0/20
+        MapPublicIpOnLaunch: true
+    InternetGateway:
+      Type: 'AWS::EC2::InternetGateway'
+      Properties:
+        Tags:
+          - Key: Name
+            Value: !Join [_, [!Ref 'AWS::StackName']]
+          - Key: Network
+            Value: Public
+    GatewayToInternet:
+      Type: 'AWS::EC2::VPCGatewayAttachment'
+      Properties:
+        VpcId: !Ref PubPrivateVPC
+        InternetGatewayId: !Ref InternetGateway
+    PublicRouteTable:
+      Type: 'AWS::EC2::RouteTable'
+      Properties:
+        VpcId: !Ref PubPrivateVPC
+        Tags:
+          - Key: Network
+            Value: Public
+    PublicRoute:
+      Type: 'AWS::EC2::Route'
+      DependsOn: GatewayToInternet
+      Properties:
+        RouteTableId: !Ref PublicRouteTable
+        DestinationCidrBlock: 0.0.0.0/0
+        GatewayId: !Ref InternetGateway
+    PublicSubnet1RouteTableAssociation:
+      Type: 'AWS::EC2::SubnetRouteTableAssociation'
+      Properties:
+        SubnetId: !Ref PublicSubnet1
+        RouteTableId: !Ref PublicRouteTable
+    BatchSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Allow all ports
+        VpcId:
+          Ref: PubPrivateVPC
+    EC2SpotFleetTaggingRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: EC2SpotFleetTaggingRole
+        AssumeRolePolicyDocument:
+          Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - 'spotfleet.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+        Path: /service-role/
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AmazonEC2SpotFleetTaggingRole
+    ECSInstanceRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ECSInstanceProfileRole
+        AssumeRolePolicyDocument:
+          Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - 'ec2.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+        Path: /service-role/
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+    ECSInstanceProfile:
+      Type: AWS::IAM::InstanceProfile
+      Properties: 
+        InstanceProfileName: ECSInstanceProfileRole
+        Roles: 
+          - !Ref ECSInstanceRole
+    # This is a role which is used by the code within tasks.
+    ECSTaskRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ecs-tasks.amazonaws.com]
+            Action: ['sts:AssumeRole']
+        Path: /
+        Policies:
+          - PolicyName: AmazonECSTaskRolePolicy
+            PolicyDocument:
+              Statement:
+              # Allow the ECS tasks to download and upload files to S3 bucket
+              - Effect: Allow
+                Action:
+                  - 's3:ListBucket'
+                Resource: 'arn:aws:s3:::#{S3BucketName}'
+              - Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                Resource: 'arn:aws:s3:::#{S3BucketName}/*'
+              # Allow the ECS tasks to put metrics to cloudwatch
+              - Effect: Allow
+                Action:
+                  - 'cloudwatch:PutMetricData'
+                Resource: '*'
+    StateMachineRole:
+      Type: AWS::IAM::Role
+      Properties:
+        Path: /states/
+        AssumeRolePolicyDocument:
+          Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - states.amazonaws.com
+            Action:
+              - sts:AssumeRole
+        Policies:
+          - PolicyName: StatePolicy
+            PolicyDocument:
+              Statement:
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource:
+                  - 'arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-*'
+              - Effect: Allow
+                Action:
+                  - 'states:StartExecution'
+                  - 'states:DescribeExecution'
+                  - 'states:StopExecution'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'events:PutTargets'
+                  - 'events:PutRule'
+                  - 'events:DescribeRule'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'batch:SubmitJob'
+                  - 'batch:DescribeJobs'
+                  - 'batch:TerminateJob'
+                Resource: '*'
