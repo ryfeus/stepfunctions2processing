@@ -1,4 +1,4 @@
-service: DeepLearningTrainingGPU
+service: DeepLearningTrainingBatchGPU
 
 frameworkVersion: ">=1.2.0 <2.0.0"
 
@@ -96,11 +96,11 @@ resources:
   Parameters:
     ImageName:
       Type: String
-      Default: ${env:IMAGE_NAME} # ryfeus/serverless-for-deep-learning:cpu
+      Default: ${env:IMAGE_NAME} # ryfeus/serverless-for-deep-learning:latest
       Description: The name of a docker image that contains the training code
     S3BucketName:
       Type: String
-      Default: ${env:S3_BUCKET} # serverless-for-deep-learning
+      Default: ${env:S3_BUCKET} # serverless-for-deep-learning-training
       Description: S3 bucket which we will use to store hyperparameters and models
     ComputeType:
       Type: String
@@ -111,7 +111,7 @@ resources:
       Type: AWS::Batch::ComputeEnvironment
       Properties:
         Type: MANAGED
-        ServiceRole: AWSBatchServiceRole
+        ServiceRole: BatchServiceRole
         ComputeEnvironmentName: '#{AWS::StackName}-ComputeEnvironment'
         ComputeResources:
           MaxvCpus: 4
@@ -207,7 +207,7 @@ resources:
     EC2SpotFleetTaggingRole:
       Type: AWS::IAM::Role
       Properties:
-        RoleName: EC2SpotFleetTaggingRole
+        RoleName: AmazonEC2SpotFleetTaggingRole
         AssumeRolePolicyDocument:
           Statement:
           - Effect: Allow
@@ -222,7 +222,7 @@ resources:
     ECSInstanceRole:
       Type: AWS::IAM::Role
       Properties:
-        RoleName: ECSInstanceProfileRole
+        RoleName: AmazonECSInstanceProfileRole
         AssumeRolePolicyDocument:
           Statement:
           - Effect: Allow
@@ -237,7 +237,7 @@ resources:
     ECSInstanceProfile:
       Type: AWS::IAM::InstanceProfile
       Properties: 
-        InstanceProfileName: ECSInstanceProfileRole
+        InstanceProfileName: AmazonECSInstanceProfileRole
         Roles: 
           - !Ref ECSInstanceRole
     # This is a role which is used by the code within tasks.
