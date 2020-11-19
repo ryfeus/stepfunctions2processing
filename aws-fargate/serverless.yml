@@ -287,6 +287,36 @@ resources:
                   - 'logs:PutLogEvents'
                 Resource: '*'
 
+    # This is a role which is used by the code within tasks.
+    ECSTaskRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ecs-tasks.amazonaws.com]
+            Action: ['sts:AssumeRole']
+        Path: /
+        Policies:
+          - PolicyName: AmazonECSTaskRolePolicy
+            PolicyDocument:
+              Statement:
+              # Allow the ECS tasks to download and upload files to S3 bucket
+              - Effect: Allow
+                Action:
+                  # Allow the ECS tasks to upload logs to CloudWatch
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+
+    # This is a log group to which logs are saved.
+    FargateLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: '/ecs/fargate-#{AWS::StackName}'
+
     # The task definition. This is a simple metadata description of what
     # container to run, and what resource requirements it has.
     FargateTaskDefinition:
@@ -299,11 +329,7 @@ resources:
         RequiresCompatibilities:
           - FARGATE
         ExecutionRoleArn: !Ref ECSTaskExecutionRole
-        TaskRoleArn:
-          Fn::If:
-            - 'HasCustomRole'
-            - !Ref 'Role'
-            - !Ref "AWS::NoValue"
+        TaskRoleArn: !Ref ECSTaskRole
         ContainerDefinitions:
           - Name: !Ref 'ServiceName'
             Cpu: !Ref 'ContainerCpu'
@@ -314,7 +340,7 @@ resources:
             LogConfiguration:
               LogDriver: awslogs
               Options:
-                awslogs-group: /ecs/first-run-task-definition
+                awslogs-group: !Ref FargateLogGroup
                 awslogs-region: '#{AWS::Region}'
                 awslogs-stream-prefix: ecs
 
@@ -326,7 +352,12 @@ resources:
       Properties:
         ServiceName: !Ref 'ServiceName'
         Cluster: !Ref 'ECSCluster'
-        LaunchType: FARGATE
+        # Uncomment this line if you want to use FARGATE instead of FARGATE spot
+        # LaunchType: FARGATE
+        # Comment next three lines if you want to use FARGATE instead of FARGATE spot
+        CapacityProviderStrategy:
+          - CapacityProvider: FARGATE_SPOT
+            Weight: 1
         DeploymentConfiguration:
           MaximumPercent: 200
           MinimumHealthyPercent: 75
@@ -377,4 +408,4 @@ resources:
                   - 'events:PutTargets'
                   - 'events:PutRule'
                   - 'events:DescribeRule'
-                Resource: 'arn:aws:events:#{AWS::Region}:#{AWS::AccountId}:rule/StepFunctionsGetEventsForECSTaskRule'     
+                Resource: 'arn:aws:events:#{AWS::Region}:#{AWS::AccountId}:rule/StepFunctionsGetEventsForECSTaskRule'
