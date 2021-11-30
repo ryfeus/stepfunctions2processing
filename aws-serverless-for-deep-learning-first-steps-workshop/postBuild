@@ -1,0 +1,50 @@
+#!/bin/bash
+
+CONTEXT_IDENTIFIER='0636920414766'
+NOTEBOOK_FPID='9781492088400'
+
+# timestamp to invalidate JupyterHub server cache
+TIMESTAMP=`date +'%s'`
+
+# add CodeMirror config
+mkdir -p ~/.jupyter/nbconfig
+echo '{"CodeCell":{"cm_config":{"lineNumbers":true,"theme":"oreillybat"}}}' \
+    > ~/.jupyter/nbconfig/notebook.json
+
+# configure custom templates
+mkdir -p ~/.jupyter/templates
+echo "c.NotebookApp.extra_template_paths = ['~/.jupyter/templates']" \
+    > ~/.jupyter/jupyter_notebook_config.py
+
+cat << EOF > ~/.jupyter/templates/page.html
+{% extends "templates/page.html" %}
+
+{% block stylesheet %}
+{# stylesheets and any js that needs to load before everything else #}
+<link rel="stylesheet" href="https://new-content.binderhub-prod.gcp.oreilly.com/extra_static/custom.css" type="text/css"/>
+<script>
+  window.notebookIdentifier = '$NOTEBOOK_FPID';
+  window.contextIdentifier = '$CONTEXT_IDENTIFIER';
+</script>
+<script src="https://new-content.binderhub-prod.gcp.oreilly.com/extra_static/oreilly-notebooks-usage-meter.min.js?t=$TIMESTAMP"></script>
+<script src="https://new-content.binderhub-prod.gcp.oreilly.com/extra_static/notebook-custom-vendor.js?t=$TIMESTAMP"></script>
+<script src="https://new-content.binderhub-prod.gcp.oreilly.com/extra_static/notebook-custom-head.js?t=$TIMESTAMP"></script>
+{{super()}}
+{% endblock %}
+
+{% block script %}
+{{super()}}
+{# js that should load after dom is ready #}
+<script src="https://new-content.binderhub-prod.gcp.oreilly.com/extra_static/notebook-custom-body.js?t=$TIMESTAMP"></script>
+{% endblock %}
+EOF
+
+BINDER_DIR=`dirname "${0}"`
+rm "${0}"
+
+if [ -f "${BINDER_DIR}/postBuild.original" ]
+then
+  mv "${BINDER_DIR}/postBuild.original" "${BINDER_DIR}/postBuild"
+fi
+
+# vim: ft=sh

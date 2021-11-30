@@ -1,4 +1,4 @@
-service: DeepLearningTrainingBatchGPU
+service: DeepLearningTrainingBatchGPUTest
 
 frameworkVersion: ">=1.2.0 <2.0.0"
 
@@ -53,7 +53,7 @@ stepFunctions:
             Next: PrepareMapStepF
           PrepareMapStepF:
             Type: Task
-            Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${opt:stage}-map
+            Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-dev-map
             Next: MapStep
           MapStep:
             Type: Map
@@ -81,11 +81,11 @@ stepFunctions:
             Next: ReduceStepF
           ReduceStepF:
             Type: Task
-            Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${opt:stage}-reduce
+            Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-dev-reduce
             Next: PublishStepF
           PublishStepF:
             Type: Task
-            Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${opt:stage}-publisher
+            Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-dev-publisher
             End: true
 
 plugins:
@@ -188,7 +188,8 @@ resources:
             Value: Public
     PublicRoute:
       Type: 'AWS::EC2::Route'
-      DependsOn: GatewayToInternet
+      DependsOn: 
+        - GatewayToInternet
       Properties:
         RouteTableId: !Ref PublicRouteTable
         DestinationCidrBlock: 0.0.0.0/0
@@ -207,7 +208,7 @@ resources:
     EC2SpotFleetTaggingRole:
       Type: AWS::IAM::Role
       Properties:
-        RoleName: AmazonEC2SpotFleetTaggingRole
+        RoleName: AmazonEC2SpotFleetTagRole-${self:service}
         AssumeRolePolicyDocument:
           Statement:
           - Effect: Allow

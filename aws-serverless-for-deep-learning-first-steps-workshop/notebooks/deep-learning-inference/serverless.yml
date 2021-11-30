@@ -1,0 +1,78 @@
+service: DeepLearningInference
+
+frameworkVersion: ">=1.2.0 <2.0.0"
+
+provider:
+  name: aws
+  region: us-east-1
+  runtime: python3.7
+  memorySize: 128
+  timeout: 10
+
+package:
+  exclude:
+    - node_modules/**
+    - container/**
+    - models/**
+
+functions:
+  mapper:
+    handler: index.handlerMapper
+  inference-old:
+    handler: index.handlerInferenceOld
+    memorySize: 3008
+    timeout: 30
+    package:
+      individually: true
+      include:
+        - models/converted_model_1.tflite
+  inference-new:
+    handler: index.handlerInferenceNew
+    memorySize: 3008
+    timeout: 30
+    package:
+      individually: true
+      include:
+        - models/converted_model_2.tflite
+  publisher:
+    handler: index.handlerPublisher
+
+
+stepFunctions:
+  stateMachines:
+    HelloWorldStepFunction:
+      events:
+        - http:
+            path: startFunction
+            method: GET
+      name: ${self:service}-StepFunction
+      definition:
+        StartAt: StartStepF
+        States:
+          StartStepF:
+            Type: Task
+            Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${opt:stage}-mapper
+            Next: ChoiceStepF
+          ChoiceStepF:
+            Type: Choice
+            Choices:
+              - Variable: "$.model_type"
+                StringEquals: "NewModel"
+                Next: NewModel
+            Default: OldModel
+          OldModel:
+            Type: Task
+            Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${opt:stage}-inference-old
+            Next: PublishStepF
+          NewModel:
+            Type: Task
+            Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${opt:stage}-inference-new
+            Next: PublishStepF
+          PublishStepF:
+            Type: Task
+            Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${opt:stage}-publisher
+            End: true
+
+plugins:
+  - serverless-step-functions
+  - serverless-pseudo-parameters

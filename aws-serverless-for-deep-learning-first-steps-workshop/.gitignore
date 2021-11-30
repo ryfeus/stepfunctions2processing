@@ -1,0 +1,5 @@
+**/.DS_Store
+.ipynb_checkpoints/*
+**/package-lock.json
+**/node_modules
+**/.serverless
