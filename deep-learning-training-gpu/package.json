@@ -3,8 +3,7 @@
   "version": "0.1.0",
   "description": "A serverless example which uses AWS Step Functions and AWS Batch",
   "dependencies": {
-    "serverless-pseudo-parameters": "2.4.0",
-    "serverless-step-functions": "1.19.2"
+    "serverless-step-functions": "3.5.1"
   },
   "author": "Rustem Feyzkhanov",
   "license": "MIT"

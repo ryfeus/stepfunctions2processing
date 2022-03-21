@@ -1,6 +1,6 @@
 service: DeepLearningTrainingBatchGPUTest
 
-frameworkVersion: ">=1.2.0 <2.0.0"
+frameworkVersion: ">=3.0.0"
 
 provider:
   name: aws
@@ -13,30 +13,33 @@ provider:
     - Effect: Allow
       Action:
         - 's3:ListBucket'
-      Resource: 'arn:aws:s3:::#{S3BucketName}'
+      Resource: 'arn:aws:s3:::${env:S3_BUCKET}'
     - Effect: Allow
       Action:
         - 's3:PutObject'
         - 's3:GetObject'
-      Resource: 'arn:aws:s3:::#{S3BucketName}/*'
+      Resource: 'arn:aws:s3:::${env:S3_BUCKET}/*'
 
 package:
   exclude:
     - node_modules/**
 
 functions:
-  map:
+  LambdaMap:
     handler: index.handlerMap
-  reduce:
+  LambdaReduce:
     handler: index.handlerReduce
-  publisher:
+  LambdaPublisher:
     handler: index.handlerPublisher
 
 
 stepFunctions:
   stateMachines:
     HelloWorldStepFunction:
-      role: !GetAtt StateMachineRole.Arn
+      role:
+        Fn::GetAtt:
+          - StateMachineRole
+          - Arn
       events:
         - http:
             path: startFunction
@@ -48,12 +51,15 @@ stepFunctions:
           StartStepF:
             Type: Pass
             Result:
-              s3_bucket: '#{S3BucketName}'
+              s3_bucket: '${env:S3_BUCKET}'
             ResultPath: "$.state_params"
             Next: PrepareMapStepF
           PrepareMapStepF:
             Type: Task
-            Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-dev-map
+            Resource:
+              Fn::GetAtt:
+                - LambdaMap
+                - Arn
             Next: MapStep
           MapStep:
             Type: Map
@@ -81,16 +87,21 @@ stepFunctions:
             Next: ReduceStepF
           ReduceStepF:
             Type: Task
-            Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-dev-reduce
+            Resource:
+              Fn::GetAtt:
+                - LambdaReduce
+                - Arn
             Next: PublishStepF
           PublishStepF:
             Type: Task
-            Resource: arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-dev-publisher
+            Resource:
+              Fn::GetAtt:
+                - LambdaPublisher
+                - Arn
             End: true
 
 plugins:
   - serverless-step-functions
-  - serverless-pseudo-parameters
 
 resources:
   Parameters:
@@ -112,12 +123,12 @@ resources:
       Properties:
         Type: MANAGED
         ServiceRole: BatchServiceRole
-        ComputeEnvironmentName: '#{AWS::StackName}-ComputeEnvironment'
+        ComputeEnvironmentName: '${sls:instanceId}-ComputeEnvironment'
         ComputeResources:
           MaxvCpus: 4
           SecurityGroupIds:
             - !Ref BatchSecurityGroup
-          Type: '#{ComputeType}'
+          Type: '${env:INSTANCE_TYPE}'
           SpotIamFleetRole: !GetAtt EC2SpotFleetTaggingRole.Arn
           Subnets:
             - !Ref PublicSubnet1
@@ -125,7 +136,7 @@ resources:
           InstanceRole: !Ref ECSInstanceRole
           InstanceTypes:
             - p2.xlarge
-          Tags: {"Name": "Batch Instance - #{AWS::StackName}"}
+          Tags: {"Name": "Batch Instance - ${sls:instanceId}"}
           DesiredvCpus: 0
         State: ENABLED
     JobQueue:
@@ -136,20 +147,20 @@ resources:
             ComputeEnvironment: !Ref ComputeEnvironment
         State: ENABLED
         Priority: 1
-        JobQueueName: '#{AWS::StackName}-JobQueue'
+        JobQueueName: '${sls:instanceId}-JobQueue'
     JobDefinition:
       Type: "AWS::Batch::JobDefinition"
       Properties:
         Type: Container
         ContainerProperties: 
-          Image: '#{ImageName}'
+          Image: '${env:IMAGE_NAME}'
           JobRoleArn: !Ref ECSTaskRole
           Memory: 60000
           Vcpus: 4
           ResourceRequirements:
             - Type: 'GPU'
               Value: 1
-        JobDefinitionName: '#{AWS::StackName}-JobDefinition'
+        JobDefinitionName: '${sls:instanceId}-JobDefinition'
         RetryStrategy: 
           Attempts: 1
     PubPrivateVPC:
@@ -158,12 +169,12 @@ resources:
         CidrBlock: 172.31.0.0/16
         Tags:
           - Key: Name
-            Value: !Join [_, [!Ref 'AWS::StackName']]
+            Value: !Join [_, ['${sls:instanceId}']]
     PublicSubnet1:
       Type: 'AWS::EC2::Subnet'
       Properties:
         VpcId: !Ref PubPrivateVPC
-        AvailabilityZone: '#{AWS::Region}a'
+        AvailabilityZone: '${aws:region}a'
         CidrBlock: 172.31.48.0/20
         MapPublicIpOnLaunch: true
     InternetGateway:
@@ -171,7 +182,7 @@ resources:
       Properties:
         Tags:
           - Key: Name
-            Value: !Join [_, [!Ref 'AWS::StackName']]
+            Value: !Join [_, ['${sls:instanceId}']]
           - Key: Network
             Value: Public
     GatewayToInternet:
@@ -260,12 +271,12 @@ resources:
               - Effect: Allow
                 Action:
                   - 's3:ListBucket'
-                Resource: 'arn:aws:s3:::#{S3BucketName}'
+                Resource: 'arn:aws:s3:::${env:S3_BUCKET}'
               - Effect: Allow
                 Action:
                   - 's3:PutObject'
                   - 's3:GetObject'
-                Resource: 'arn:aws:s3:::#{S3BucketName}/*'
+                Resource: 'arn:aws:s3:::${env:S3_BUCKET}/*'
               # Allow the ECS tasks to put metrics to cloudwatch
               - Effect: Allow
                 Action:
@@ -290,10 +301,7 @@ resources:
               - Effect: Allow
                 Action:
                   - 'lambda:InvokeFunction'
-                Resource:
-                  - 'arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-dev-map'
-                  - 'arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-dev-reduce'
-                  - 'arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-dev-publisher'
+                Resource: '*'
               - Effect: Allow
                 Action:
                   - 'states:StartExecution'
