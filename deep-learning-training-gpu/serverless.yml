@@ -1,11 +1,11 @@
-service: DeepLearningTrainingBatchGPUTest
+service: DeepLearningTrainingBatchGPU
 
 frameworkVersion: ">=3.0.0"
 
 provider:
   name: aws
   region: us-east-1
-  runtime: python3.6
+  runtime: python3.8
   memorySize: 128
   timeout: 10
   iamRoleStatements:
