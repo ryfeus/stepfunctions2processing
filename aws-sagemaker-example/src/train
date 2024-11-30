@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+import argparse
+import os
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms, models
+import numpy as np
+from sklearn.metrics import roc_auc_score
+import json
+import logging
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger()
+
+class Autoencoder(nn.Module):
+    def __init__(self):
+        super(Autoencoder, self).__init__()
+        # Encoder
+        self.encoder = nn.Sequential(
+            nn.Conv2d(3, 64, 4, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 128, 4, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(128, 256, 4, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(256, 1024, 4, stride=2, padding=1), # Change 512 => 1024
+            nn.ReLU(),
+        )
+        # Decoder
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(1024, 256, 4, stride=2, padding=1), # Change 512 => 1024
+            nn.ReLU(),
+            nn.ConvTranspose2d(256, 128, 4, stride=2, padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 3, 4, stride=2, padding=1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        x = self.encoder(x)
+        x = self.decoder(x)
+        return x
+
+def main():
+    with open('/opt/ml/input/config/hyperparameters.json') as json_file:
+        hyperparameters = json.load(json_file)
+        logger.info(hyperparameters)
+    data_dir = "/opt/ml/input/data/training"
+    model_dir = '/opt/ml/model'
+
+    # Set device
+    logger.info(f'Cuda available: {torch.cuda.is_available()}')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
+
+    # Define data directories
+    train_dir = os.path.join(data_dir, 'train')
+    test_dir = os.path.join(data_dir, 'test')
+
+    # Define transforms
+    transform = transforms.Compose([
+        transforms.Resize((128, 128)),
+        transforms.ToTensor(),
+    ])
+
+    # Create datasets and loaders
+    train_dataset = datasets.ImageFolder(root=train_dir, transform=transform)
+    test_dataset = datasets.ImageFolder(root=test_dir, transform=transform)
+
+    train_loader = DataLoader(train_dataset, batch_size=int(hyperparameters["batch-size"]), shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=int(hyperparameters["batch-size"]), shuffle=False)
+
+    logger.info(f'Training dataset size: {len(train_dataset)}, Testing dataset size: {len(test_dataset)}')
+    logger.info(f'Batch size: {hyperparameters["batch-size"]}, Epochs: {hyperparameters["epochs"]}, Learning rate: {hyperparameters["learning-rate"]}')
+
+    # Initialize model, criterion, optimizer
+    model = Autoencoder().to(device)
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=float(hyperparameters["learning-rate"]))
+
+    # Training loop
+    for epoch in range(int(hyperparameters["epochs"])):
+        model.train()
+        running_loss = 0.0
+        for data, _ in train_loader:
+            data = data.to(device)
+            optimizer.zero_grad()
+            outputs = model(data)
+            loss = criterion(outputs, data)
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item() * data.size(0)
+        epoch_loss = running_loss / len(train_loader.dataset)
+        logger.info(f'Epoch [{epoch+1}/{int(hyperparameters["epochs"])}], Loss: {epoch_loss:.6f}')
+
+    # Function to compute reconstruction errors and labels
+    def compute_reconstruction_errors(loader):
+        model.eval()
+        errors = []
+        labels = []
+        with torch.no_grad():
+            for data, label in loader:
+                data = data.to(device)
+                outputs = model(data)
+                loss = torch.mean((outputs - data) ** 2, dim=[1,2,3])
+                errors.extend(loss.cpu().numpy())
+                labels.extend(label.cpu().numpy())
+        return errors, labels
+
+    # Compute reconstruction errors and labels for test dataset
+    errors, labels = compute_reconstruction_errors(test_loader)
+
+    logger.info(f'Sample reconstruction errors (first 10): {errors[:10]}')
+
+    # Map labels: 'good' class (1) to 0, 'bad' class (0) to 1
+    labels = 1-np.array(labels)
+    errors = np.array(errors)
+    anomaly_labels = labels  # Assuming 'bad' images are labeled as 1
+    anomaly_score = errors
+
+    # Compute ROC AUC
+    auc = roc_auc_score(anomaly_labels, anomaly_score)
+    logger.info(f'ROC AUC: {auc:.4f}')
+
+    # Save the trained model
+    model_path = os.path.join(model_dir, 'model.pth')
+    torch.save(model.state_dict(), model_path)
+    logger.info(f'Model saved to {model_path}')
+
+if __name__ == '__main__':
+    main()
